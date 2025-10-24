@@ -4,6 +4,8 @@ import { User } from "../models/user.model.js"
 import { uploadOnCloudinary } from "../utils/cloudinary.js"
 import { ApiResponse } from "../utils/ApiResponse.js"
 import jwt from "jsonwebtoken"
+import { deleteImage } from "../utils/deleteImage.js"
+import mongoose from "mongoose"
 
 const generateAccessTokenAndRefreshToken = async(userId) => {
     try {
@@ -248,7 +250,7 @@ const changeCurrentPassword = asyncHandler( async(req,res) => {
 
     return res
     .status(200)
-    .json( new ApiResponse(200, "Password changed successfully") )
+    .json( new ApiResponse(200,{}, "Password changed successfully") )
 
 })
 
@@ -266,7 +268,7 @@ const updateAccountDetails = asyncHandler(async(req,res) => {
         throw new ApiError(400,"All fiels are required")
     }
 
-    const user =  await User.findById(
+    const user =  await User.findByIdAndUpdate(
         req.user?._id,
         {
             $set: {
@@ -297,19 +299,23 @@ const updateUserAvatar = asyncHandler( async(req,res) => {
     }
 
     const user = await User.findById(
-        req.user?._id,
-        {
-            $set: {
-                avatar: avatar.url
-            }
-        },
-        {new: true}
+        req.user?._id
+    )
 
-    ).select("-password")
+    if (user.avatar) {
+        deleteImage(user.avatar)
+    }
+
+    user.avatar = avatar.url
+
+    await user.save({ validateBeforeSave: false });
+
+    const updatedUser = user.toObject();
+    delete updatedUser.password;
 
     return res
     .status(200)
-    .json( new ApiResponse(200, user, "Avatar updated successfully"))
+    .json( new ApiResponse(200, updatedUser, "Avatar updated successfully"))
 
 })
 
@@ -327,20 +333,148 @@ const updateUserCoverImage = asyncHandler( async(req,res) => {
     }
 
     const user = await User.findById(
-        req.user?._id,
-        {
-            $set: {
-                coverImage: coverImage.url
-            }
-        },
-        {new: true}
+        req.user?._id
+    )
 
-    ).select("-password")
+    if (user.coverImage) {
+        deleteImage(user.coverImage)
+    }
+
+    user.coverImage = coverImage.url
+
+    await user.save({ validateBeforeSave: false });
+
+    const updatedUser = user.toObject();
+    delete updatedUser.password;
 
     return res
     .status(200)
-    .json( new ApiResponse(200, user, "coverImage updated successfully"))
+    .json( new ApiResponse(200, updatedUser, "coverImage updated successfully"))
 
+})
+
+const gerUserChannelProfile = asyncHandler(async(req,res) => {
+    const {username} = req.params
+
+    if(!username?.trim()){
+        throw new ApiError(400, "username not found");
+    }
+
+    const channel = await User.aggregate([
+        {
+            $match: {
+                username: username?.toLowerCase()
+            }
+        },
+        {
+            $lookup: {
+                from: "subscriptions",
+                localField: "_id",
+                foreignField: "channel",
+                as: "subscribers"
+            }
+        },
+        {
+            $lookup: {
+                from: "subscriptions",
+                localFeild: "_id",
+                foreignField: "subscriber",
+                as: "subscribedTo"
+            }
+        },
+        {
+            $addFileds: {
+                subscribersCount: {
+                    $size: "$subscribers"
+                },
+                channelSubsctibedToCount: {
+                    $size: "$subscribedTo"
+                },
+                isSubscribed: {
+                    $cond: {
+                        if: {$in: [req.user?._id, "$subscribers.subscriber"]},
+                        then: true,
+                        else: false
+                    }
+                }
+            }
+        },
+        {
+            $project: {
+                fullName: 1,
+                username: 1,
+                subscribersCount: 1,
+                channelSubsctibedToCount: 1,
+                isSubscribed: 1,
+                avatar: 1,
+                coverImage: 1,
+                email: 1
+            }
+        }
+    ])
+
+    if(!channel?.length) {
+        throw new ApiError(400, "channel does not exist");
+    }
+
+    return res
+    .status(200)
+    .json(
+        new ApiResponse(200, channel[0], "User channel fetched successfully")
+    )
+
+})
+
+const getWatchHistory = asyncHandler(async(req,res) => {
+    const user = await User.aggregate([
+        {
+            $match: {
+                //why not direct req.user?._id because when u use aggregate it must be converted into objectId beacuse in mongodb we need object id but req.user?._id give us string 
+                _id: mongoose.Types.ObjectId(req.user?._id)
+            }
+        },
+        {
+            $lookup: {
+                from: "videos",
+                localField: "watchHistory",
+                foreignField: "_id",
+                as: "watchHistory",
+                //nested pipline   
+                pipeline: [
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "owner",
+                            foreignField: "_id",
+                            as: "owner",
+                            pipeline: [
+                                {
+                                    $project: {
+                                        fullName: 1,
+                                        username: 1,
+                                        avatar: 1, 
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        $addFileds: {
+                            owner: {
+                                $first: "$owner"
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    ])
+
+    return res
+    .status(200)
+    .json(
+        new ApiResponse(200, user[0].watchHistory, "watch history fetched successfully")
+    )
 })
 
 export {
@@ -352,5 +486,7 @@ export {
     getCurrentUser,
     updateAccountDetails,
     updateUserAvatar,
-    updateUserCoverImage
+    updateUserCoverImage,
+    gerUserChannelProfile,
+    getWatchHistory
 }
